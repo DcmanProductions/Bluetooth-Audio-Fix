@@ -5,23 +5,13 @@ https://github.com/dcmanproductions/Bluetooth-Audio-Fix
 Licensed under the GNU General Public License v3.0
 https://www.gnu.org/licenses/lgpl-3.0.html
 */
-#include <iostream>
-#include <portaudio.h>
-#include <Windows.h>
-#include <string>
 
-static int paCallback(const void* inputBuffer, void* outputBuffer, unsigned long framesPerBuffer,
-	const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData)
-{
-	float* out = (float*) outputBuffer;
-	for (unsigned int i = 0; i < framesPerBuffer; i++)
-	{
-		// Stereo channels are interleaved
-		*out++ = 0.0f; // Left channel
-		*out++ = 0.0f; // Right channel
-	}
-	return paContinue;
-}
+#include <Windows.h>
+#include <iostream>
+#include <mmdeviceapi.h>
+#include <endpointvolume.h>
+#include <chrono>
+#include <thread>
 
 BOOL IsUserAdmin(VOID)
 {
@@ -47,22 +37,98 @@ BOOL IsUserAdmin(VOID)
 	return(b);
 }
 
+void SendEmptyAudioPacketToAllDevices()
+{
+	CoInitialize(NULL);
+
+	IMMDeviceEnumerator* enumerator;
+	IMMDeviceCollection* deviceCollection;
+	IMMDevice* device;
+
+	// Create the device enumerator
+	HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (LPVOID*) &enumerator);
+	if (FAILED(result))
+	{
+		// Error handling
+		CoUninitialize();
+		return;
+	}
+
+	// Enumerate audio render devices
+	result = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &deviceCollection);
+	if (FAILED(result))
+	{
+		// Error handling
+		enumerator->Release();
+		CoUninitialize();
+		return;
+	}
+
+	// Get the device count
+	UINT deviceCount;
+	result = deviceCollection->GetCount(&deviceCount);
+	if (FAILED(result))
+	{
+		// Error handling
+		deviceCollection->Release();
+		enumerator->Release();
+		CoUninitialize();
+		return;
+	}
+
+	// Iterate over each audio render device
+	for (UINT i = 0; i < deviceCount; i++)
+	{
+		// Get the device
+		result = deviceCollection->Item(i, &device);
+		if (FAILED(result))
+		{
+			// Error handling
+			continue;
+		}
+
+		// Activate the device
+		IAudioEndpointVolume* endpointVolume;
+		result = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID*) &endpointVolume);
+		if (FAILED(result))
+		{
+			// Error handling
+			device->Release();
+			continue;
+		}
+
+		// Send an empty audio packet
+		//result = endpointVolume->SetMasterVolumeLevelScalar(0.0f, NULL);
+		if (FAILED(result))
+		{
+			// Error handling
+		}
+
+		// Release resources
+		endpointVolume->Release();
+		device->Release();
+	}
+
+	// Release resources
+	deviceCollection->Release();
+	enumerator->Release();
+
+	CoUninitialize();
+}
+
 int main(int* length, char** args)
 {
 	if (!IsUserAdmin())
 	{
 		std::cerr << "BAF Needs to be run as administrator. Restarting as admin..." << std::endl;
 
-		char* p = args[0]; //just for proper syntax highlighting ..."
+		char* path = args[0];
 		const WCHAR* pwcsName;
-		// required size
-		int nChars = MultiByteToWideChar(CP_ACP, 0, p, -1, NULL, 0);
-		// allocate it
+		int nChars = MultiByteToWideChar(CP_ACP, 0, path, -1, NULL, 0);
 		pwcsName = new WCHAR[nChars];
-		MultiByteToWideChar(CP_ACP, 0, p, -1, (LPWSTR) pwcsName, nChars);
+		MultiByteToWideChar(CP_ACP, 0, path, -1, (LPWSTR) pwcsName, nChars);
 
 		LPCWSTR applicationName = pwcsName;
-		// delete it
 		delete[] pwcsName;
 		HINSTANCE hInstance = ShellExecute(NULL, L"runas", applicationName, NULL, NULL, SW_SHOWNORMAL);
 		if ((int) hInstance <= 32)
@@ -72,46 +138,12 @@ int main(int* length, char** args)
 		}
 		return 1;
 	}
-
-	PaError err = Pa_Initialize();
-	if (err != paNoError)
+	while (true)
 	{
-		std::cerr << "PortAudio error: " << Pa_GetErrorText(err) << std::endl;
+		std::cout << "Polling" << std::endl;
+		SendEmptyAudioPacketToAllDevices();
+
+		std::this_thread::sleep_for(std::chrono::seconds(2));
 	}
-
-	PaStreamParameters inputParameters, outputParameters;
-	inputParameters.device = Pa_GetDefaultInputDevice();
-	inputParameters.channelCount = 2;
-	inputParameters.sampleFormat = paFloat32;
-	inputParameters.suggestedLatency = Pa_GetDeviceInfo(Pa_GetDefaultInputDevice())->defaultLowInputLatency;
-
-	outputParameters.device = Pa_GetDefaultOutputDevice();
-	outputParameters.channelCount = 2;
-	outputParameters.sampleFormat = paFloat32;
-	outputParameters.suggestedLatency = Pa_GetDeviceInfo(Pa_GetDefaultOutputDevice())->defaultLowOutputLatency;
-
-	PaStream* stream;
-	err = Pa_OpenStream(&stream, &inputParameters, &outputParameters, NULL, NULL, paClipOff, &paCallback, NULL);
-	if (err != paNoError)
-	{
-		std::cerr << "PortAudio error: " << Pa_GetErrorText(err) << std::endl;
-		return 1;
-	}
-
-	err = Pa_StartStream(stream);
-	if (err != paNoError)
-	{
-		std::cerr << "PortAudio error: " << Pa_GetErrorText(err) << std::endl;
-		Pa_CloseStream(stream);
-		return 1;
-	}
-
-	// Run the stream for 5 seconds
-	Pa_Sleep(5000);
-
-	err = Pa_StopStream(stream);
-	err = Pa_CloseStream(stream);
-
-	Pa_Terminate();
 	return 0;
 }
