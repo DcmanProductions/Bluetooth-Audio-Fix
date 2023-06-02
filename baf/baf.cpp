@@ -8,10 +8,12 @@ https://www.gnu.org/licenses/lgpl-3.0.html
 
 #include <Windows.h>
 #include <iostream>
+#include <audioclient.h>
 #include <mmdeviceapi.h>
-#include <endpointvolume.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <chrono>
 #include <thread>
+#include <cmath>
 
 BOOL IsUserAdmin(VOID)
 {
@@ -37,16 +39,18 @@ BOOL IsUserAdmin(VOID)
 	return(b);
 }
 
+const double PI = 3.14159265358979323846;
 void SendEmptyAudioPacketToAllDevices()
 {
-	CoInitialize(NULL);
+	CoInitialize(nullptr);
 
-	IMMDeviceEnumerator* enumerator;
-	IMMDeviceCollection* deviceCollection;
-	IMMDevice* device;
+	IMMDeviceEnumerator* enumerator = nullptr;
+	IMMDeviceCollection* deviceCollection = nullptr;
+	IMMDevice* device = nullptr;
+	IAudioClient* audioClient = nullptr;
+	IAudioRenderClient* renderClient = nullptr;
 
-	// Create the device enumerator
-	HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (LPVOID*) &enumerator);
+	HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<LPVOID*>(&enumerator));
 	if (FAILED(result))
 	{
 		// Error handling
@@ -54,7 +58,6 @@ void SendEmptyAudioPacketToAllDevices()
 		return;
 	}
 
-	// Enumerate audio render devices
 	result = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &deviceCollection);
 	if (FAILED(result))
 	{
@@ -64,8 +67,7 @@ void SendEmptyAudioPacketToAllDevices()
 		return;
 	}
 
-	// Get the device count
-	UINT deviceCount;
+	UINT deviceCount = 0;
 	result = deviceCollection->GetCount(&deviceCount);
 	if (FAILED(result))
 	{
@@ -76,10 +78,8 @@ void SendEmptyAudioPacketToAllDevices()
 		return;
 	}
 
-	// Iterate over each audio render device
 	for (UINT i = 0; i < deviceCount; i++)
 	{
-		// Get the device
 		result = deviceCollection->Item(i, &device);
 		if (FAILED(result))
 		{
@@ -87,9 +87,7 @@ void SendEmptyAudioPacketToAllDevices()
 			continue;
 		}
 
-		// Activate the device
-		IAudioEndpointVolume* endpointVolume;
-		result = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID*) &endpointVolume);
+		result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&audioClient));
 		if (FAILED(result))
 		{
 			// Error handling
@@ -97,19 +95,123 @@ void SendEmptyAudioPacketToAllDevices()
 			continue;
 		}
 
-		// Send an empty audio packet
-		//result = endpointVolume->SetMasterVolumeLevelScalar(0.0f, NULL);
+		WAVEFORMATEX* mixFormat = nullptr;
+		result = audioClient->GetMixFormat(&mixFormat);
+		if (FAILED(result))
+		{
+			// Error handling
+			audioClient->Release();
+			device->Release();
+			continue;
+		}
+
+		// Set the audio format to match the mix format
+		result = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, mixFormat, nullptr);
+		if (FAILED(result))
+		{
+			// Error handling
+			CoTaskMemFree(mixFormat);
+			audioClient->Release();
+			device->Release();
+			continue;
+		}
+
+		CoTaskMemFree(mixFormat);
+
+		result = audioClient->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&renderClient));
+		if (FAILED(result))
+		{
+			// Error handling
+			audioClient->Release();
+			device->Release();
+			continue;
+		}
+
+		// Get the buffer size
+		UINT32 bufferSize = 0;
+		result = audioClient->GetBufferSize(&bufferSize);
+		if (FAILED(result))
+		{
+			// Error handling
+			renderClient->Release();
+			audioClient->Release();
+			device->Release();
+			continue;
+		}
+
+		// Fill the buffer with silent audio data
+		//BYTE* buffer = nullptr;
+		//result = renderClient->GetBuffer(bufferSize, &buffer);
+		//if (FAILED(result))
+		//{
+		//	// Error handling
+		//	renderClient->Release();
+		//	audioClient->Release();
+		//	device->Release();
+		//	continue;
+		//}
+
+		//memset(buffer, 0, bufferSize);
+
+		// Generate a sine wave as audio data
+		BYTE* buffer = nullptr;
+		result = renderClient->GetBuffer(bufferSize, reinterpret_cast<BYTE**>(&buffer));
+		if (FAILED(result))
+		{
+			// Error handling
+			renderClient->Release();
+			audioClient->Release();
+			device->Release();
+			continue;
+		}
+
+		double frequency = 440.0;  // Frequency of the sine wave (440 Hz for A4)
+		double amplitude = 0.3;    // Amplitude of the sine wave (adjust as desired)
+		double time = 0.0;         // Current time
+		double angularFrequency = 2.0 * PI * frequency;
+
+		for (UINT32 i = 0; i < bufferSize; i += mixFormat->nBlockAlign)
+		{
+			// Generate sample for each channel (assuming 2 channels)
+			for (UINT32 channel = 0; channel < mixFormat->nChannels; channel++)
+			{
+				// Calculate the sine wave sample
+				double sampleValue = amplitude * sin(angularFrequency * time);
+
+				// Convert the sample to the appropriate format (16-bit signed integer)
+				INT16 sample = static_cast<INT16>(sampleValue * 32767.0);
+
+				// Write the sample to the buffer (assuming 16-bit audio)
+				*reinterpret_cast<INT16*>(buffer + i + (channel * sizeof(INT16))) = sample;
+			}
+
+			// Update the time based on the sample rate
+			time += 200;
+		}
+
+		// Release the buffer
+		result = renderClient->ReleaseBuffer(bufferSize, 0);
 		if (FAILED(result))
 		{
 			// Error handling
 		}
 
-		// Release resources
-		endpointVolume->Release();
+		renderClient->Release();
+		audioClient->Release();
+		device->Release();
+
+		// Release the buffer
+		result = renderClient->ReleaseBuffer(bufferSize, 0);
+		if (FAILED(result))
+		{
+			// Error handling
+		}
+
+		renderClient->Release();
+		audioClient->Release();
 		device->Release();
 	}
 
-	// Release resources
 	deviceCollection->Release();
 	enumerator->Release();
 
@@ -120,7 +222,7 @@ int main(int* length, char** args)
 {
 	if (!IsUserAdmin())
 	{
-		std::cerr << "BAF Needs to be run as administrator. Restarting as admin..." << std::endl;
+		std::cerr << "BAF Needs to be run as administrator. Attempting to restarting as administrator..." << std::endl;
 
 		char* path = args[0];
 		const WCHAR* pwcsName;
